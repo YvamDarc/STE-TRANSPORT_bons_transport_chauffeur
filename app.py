@@ -20,17 +20,13 @@ SOCIETES_PATH = f"{APP_ROOT}/01_SOCIETES"
 # =========================================================
 @st.cache_resource
 def get_dbx():
-    return dropbox.Dropbox(
-        oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"],
-        app_key=st.secrets["DROPBOX_CLIENT_ID"],          # client_id = app key chez Dropbox
-        app_secret=st.secrets["DROPBOX_CLIENT_SECRET"],
-    )
+    return dropbox.Dropbox(st.secrets["DROPBOX_ACCESS_TOKEN"])
 
 dbx = get_dbx()
 
-# test
+# Test
 acc = dbx.users_get_current_account()
-st.write("✅ Dropbox connecté :", acc.name.display_name)
+st.success(f"✅ Dropbox connecté : {acc.name.display_name}")
 
 def dbx_exists(path: str) -> bool:
     try:
