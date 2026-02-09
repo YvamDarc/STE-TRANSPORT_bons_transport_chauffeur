@@ -9,25 +9,41 @@ import dropbox
 from dropbox.files import WriteMode
 
 # =========================================================
-# CONFIG
+# STREAMLIT CONFIG (DOIT ÊTRE TOUT EN HAUT)
 # =========================================================
-APP_ROOT = "/TRANSPORT_APP"  # Racine dans Dropbox (dans le App Folder)
+st.set_page_config(page_title="Bon de transport", layout="centered")
+
+# =========================================================
+# CONFIG DROPBOX PATHS
+# =========================================================
+APP_ROOT = "/TRANSPORT_APP"  # Racine dans le dossier App Folder Dropbox
 MASTER_PATH = f"{APP_ROOT}/00_MASTER"
 SOCIETES_PATH = f"{APP_ROOT}/01_SOCIETES"
 
 # =========================================================
-# DROPBOX CLIENT
+# DROPBOX CLIENT (MODE SIMPLE: ACCESS TOKEN)
 # =========================================================
 @st.cache_resource
-def get_dbx():
+def get_dbx() -> dropbox.Dropbox:
+    if "DROPBOX_ACCESS_TOKEN" not in st.secrets:
+        st.error('Secret manquant : DROPBOX_ACCESS_TOKEN (Streamlit Cloud → Settings → Secrets)')
+        st.stop()
     return dropbox.Dropbox(st.secrets["DROPBOX_ACCESS_TOKEN"])
 
 dbx = get_dbx()
 
-# Test
-acc = dbx.users_get_current_account()
-st.success(f"✅ Dropbox connecté : {acc.name.display_name}")
+# Test connexion (affiche une erreur claire si KO)
+try:
+    acc = dbx.users_get_current_account()
+    st.success(f"✅ Dropbox connecté : {acc.name.display_name}")
+except Exception as e:
+    st.error("❌ Connexion Dropbox impossible (token invalide ou révoqué).")
+    st.exception(e)
+    st.stop()
 
+# =========================================================
+# DROPBOX HELPERS
+# =========================================================
 def dbx_exists(path: str) -> bool:
     try:
         dbx.files_get_metadata(path)
@@ -36,14 +52,14 @@ def dbx_exists(path: str) -> bool:
         return False
 
 def dbx_mkdir(path: str):
-    # Dropbox : crée récursivement (on ignore si existe)
+    # best effort : ignore si existe
     try:
         dbx.files_create_folder_v2(path)
     except Exception:
         pass
 
 def dbx_download_bytes(path: str) -> bytes:
-    md, res = dbx.files_download(path)
+    _md, res = dbx.files_download(path)
     return res.content
 
 def dbx_upload_bytes(path: str, content: bytes, overwrite: bool = True):
@@ -62,19 +78,23 @@ def dbx_write_csv(path: str, df: pd.DataFrame):
     dbx_upload_bytes(path, buf.getvalue().encode("utf-8"), overwrite=True)
 
 def dbx_ensure_csv(path: str, header: str):
-    if not dbx_exists(path):
-        # Assure que les dossiers existent
-        parent = os.path.dirname(path).replace("\\", "/")
-        if parent and parent != "/":
-            # create folders up the chain (best effort)
-            parts = parent.split("/")
-            curr = ""
-            for p in parts:
-                if not p:
-                    continue
-                curr += "/" + p
-                dbx_mkdir(curr)
-        dbx_upload_bytes(path, (header.strip() + "\n").encode("utf-8"), overwrite=True)
+    """
+    Crée le fichier CSV s'il n'existe pas + essaye de créer les dossiers parents.
+    """
+    if dbx_exists(path):
+        return
+
+    parent = os.path.dirname(path).replace("\\", "/")
+    if parent and parent != "/":
+        parts = parent.split("/")
+        curr = ""
+        for p in parts:
+            if not p:
+                continue
+            curr += "/" + p
+            dbx_mkdir(curr)
+
+    dbx_upload_bytes(path, (header.strip() + "\n").encode("utf-8"), overwrite=True)
 
 def only_active(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -87,8 +107,8 @@ def to_options(df: pd.DataFrame, id_col: str, label_col: str):
     if df.empty or id_col not in df.columns or label_col not in df.columns:
         return [], {}
     labels = [f"{row[label_col]} ({row[id_col]})" for _, row in df.iterrows()]
-    m = {f"{row[label_col]} ({row[id_col]})": row[id_col] for _, row in df.iterrows()}
-    return labels, m
+    mapping = {f"{row[label_col]} ({row[id_col]})": row[id_col] for _, row in df.iterrows()}
+    return labels, mapping
 
 def get_societe_from_url(allowed):
     qp = st.query_params
@@ -96,24 +116,14 @@ def get_societe_from_url(allowed):
     return soc if soc in allowed else ""
 
 # =========================================================
-# UI
-# =========================================================
-st.set_page_config(page_title="Bon de transport", layout="centered")
-
-# Test connexion (utile en debug)
-try:
-    _acc = dbx.users_get_current_account()
-except Exception as e:
-    st.error("Connexion Dropbox impossible. Vérifie tes Secrets (app_key/app_secret/refresh_token).")
-    st.exception(e)
-    st.stop()
-
-# =========================================================
-# SOCIÉTÉS
+# SOCIÉTÉS (via fichier master)
 # =========================================================
 societes_file = f"{MASTER_PATH}/02_PARAMETRES_APP/societes.csv"
 societes = dbx_read_csv(societes_file)
-allowed_societes = societes["societe_code"].tolist() if not societes.empty and "societe_code" in societes.columns else []
+
+allowed_societes = []
+if not societes.empty and "societe_code" in societes.columns:
+    allowed_societes = societes["societe_code"].tolist()
 
 societe = get_societe_from_url(allowed_societes)
 if not societe:
@@ -137,7 +147,7 @@ VEHICULES_FILE = f"{REF_PATH}/vehicules.csv"
 CLIENTS_FILE = f"{REF_PATH}/clients.csv"
 ARTICLES_FILE = f"{REF_PATH}/articles.csv"
 
-# Assure le fichier bons_transport
+# Crée bons_transport si absent
 dbx_ensure_csv(
     BT_FILE,
     "bt_id;date;chauffeur_id;vehicule_id;client_id;article_id;depart;arrivee;zone;quantite;duree;options;commentaire;statut;justificatifs_path"
@@ -160,7 +170,6 @@ article_labels, article_map = to_options(articles, "article_id", "libelle")
 # FORMULAIRE
 # =========================================================
 with st.form("bon_transport"):
-
     st.subheader("📌 Identification")
     date_transport = st.date_input("Date du transport", value=datetime.today())
 
@@ -211,7 +220,11 @@ with st.form("bon_transport"):
     commentaire = st.text_area("Commentaire")
 
     st.subheader("📷 Justificatifs")
-    fichiers = st.file_uploader("Photos / BL / POD", type=["jpg", "jpeg", "png", "pdf"], accept_multiple_files=True)
+    fichiers = st.file_uploader(
+        "Photos / BL / POD",
+        type=["jpg", "jpeg", "png", "pdf"],
+        accept_multiple_files=True
+    )
 
     submit = st.form_submit_button("✅ Enregistrer le bon")
 
@@ -221,20 +234,19 @@ with st.form("bon_transport"):
 if submit:
     bt_id = f"BT{datetime.now().strftime('%Y')}-{uuid.uuid4().hex[:6].upper()}"
 
-    # Dossier justificatifs sur Dropbox (année/mois/bt_id)
     year = datetime.now().strftime("%Y")
     month = datetime.now().strftime("%m")
     bt_justif_path = f"{JUSTIF_PATH}/{year}/{month}/{bt_id}"
 
-    # Crée le dossier (best effort)
+    # Crée le dossier justificatifs
     dbx_mkdir(bt_justif_path)
 
-    # Upload fichiers
+    # Upload justificatifs
     for f in fichiers or []:
         dest = f"{bt_justif_path}/{f.name}"
         dbx_upload_bytes(dest, f.getvalue(), overwrite=True)
 
-    # Append au CSV (on relit, concat, réécrit)
+    # Append au CSV
     df = dbx_read_csv(BT_FILE)
 
     new_row = {
